@@ -2130,6 +2130,18 @@ wheels = [
 ]
 
 [[package]]
+name = "playwright-stealth"
+version = "2.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "playwright" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/61/ee/871901103c7b2a12070011fd4d978191f8f962837bf8bb51847274f528fa/playwright_stealth-2.0.2.tar.gz", hash = "sha256:ac57e51873190da5e653e03720e948c8f0a3d06b098f1d56763103d23ee48143", size = 24902, upload-time = "2026-02-13T02:36:25.137Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/30/f95f087f4b071611a7f63a2a0c9af4df3ac046dae2a693bfdacd70512867/playwright_stealth-2.0.2-py3-none-any.whl", hash = "sha256:37a5733f481b9c0ad602cf71491aa5a7c96c2a2fe4fa1e7ab764d2cd35520f2f", size = 33209, upload-time = "2026-02-13T02:36:26.334Z" },
+]
+
+[[package]]
 name = "prompt-toolkit"
 version = "3.0.52"
 source = { registry = "https://pypi.org/simple" }
@@ -2263,6 +2275,7 @@ dependencies = [
     { name = "pipecat-ai", extra = ["daily", "elevenlabs", "local-smart-turn-v3", "openai", "runner", "silero", "webrtc"] },
     { name = "pipecat-ai-cli" },
     { name = "playwright" },
+    { name = "playwright-stealth" },
 ]
 
 [package.dev-dependencies]
@@ -2276,6 +2289,7 @@ requires-dist = [
     { name = "pipecat-ai", extras = ["webrtc", "daily", "silero", "elevenlabs", "openai", "local-smart-turn-v3", "runner"] },
     { name = "pipecat-ai-cli" },
     { name = "playwright" },
+    { name = "playwright-stealth", specifier = ">=2.0.2" },
 ]
 
 [package.metadata.requires-dev]

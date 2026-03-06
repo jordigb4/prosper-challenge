@@ -58,6 +58,8 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
     TurnAnalyzerUserTurnStopStrategy,
 )
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 logger.info("✅ All components loaded successfully!")
@@ -65,47 +67,29 @@ logger.info("✅ All components loaded successfully!")
 load_dotenv(override=True)
 
 # ---------------------------------------------------------------------------
-# Healthie tool definitions (OpenAI function-calling schema)
+# Healthie tool definitions
 # ---------------------------------------------------------------------------
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "find_patient",
-            "description": (
-                "Search Healthie for a patient by their full name and date of birth. "
-                "Call this once the caller has provided both pieces of information. "
-                "Returns patient details on success, or an error message if not found."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
+find_patient_function = FunctionSchema(
+    name = 'find_patient',
+    description="Search Healthie for a patient by their full name and date of birth. Call this once the caller has provided both pieces of information. Returns patient details on success, or an informative error message.",
+    properties={
                     "name": {
                         "type": "string",
-                        "description": "Patient's full name, e.g. 'Jane Smith'",
+                        "description": "Patient's full name, e.g. 'Jane Smith Smith'",
                     },
                     "date_of_birth": {
                         "type": "string",
                         "description": "Patient's date of birth in YYYY-MM-DD format",
                     },
-                },
-                "required": ["name", "date_of_birth"],
-            },
-        },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_appointment",
-            "description": (
-                "Book an appointment in Healthie for a verified patient. "
-                "Call this once you have the patient_id, desired date and time. "
-                "Returns appointment details on success."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
+    required=["name","date_of_birth"]
+)
+
+create_appointment_function = FunctionSchema(
+    name = 'create_appointment',
+    description=  "Book an appointment in Healthie for a verified patient. Call this once you have the patient_id, desired date and time. Returns appointment details on success.",
+    properties={
                     "patient_id": {
                         "type": "string",
                         "description": "The Healthie patient ID returned by find_patient",
@@ -118,40 +102,121 @@ TOOLS = [
                         "type": "string",
                         "description": "Appointment time in HH:MM (24-hour) format",
                     },
-                },
-                "required": ["patient_id", "date", "time"],
-            },
-        },
     },
-]
+    required=["patient_id", "date", "time"]
+)
 
+tools = ToolsSchema(standard_tools=[find_patient_function,create_appointment_function],)
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
+SYSTEM_PROMPT = """
+You are a friendly and professional appointment scheduling assistant at Prosper Health clinic.
+You are speaking with patients on a live phone call.
+Keep responses short, natural, and easy to understand.
+Your goal is to identify the patient and schedule an appointment.
 
-SYSTEM_PROMPT = """You are a friendly appointment scheduling assistant at Prosper Health clinic.
+## IDENTITY VERIFICATION
 
-Your job is to schedule appointments for patients. Follow these steps in order:
+STEP 1 — Ask for the caller's full name.
+- If the name is unclear or may have been misheard, politely ask them to repeat or spell it.
+  Examples:
+  - "Could you please repeat your name?"
+  - "Could you spell your last name for me?"
+  Do not proceed until you are reasonably confident you heard the name correctly.
 
-STEP 1 — Greet the caller warmly and ask for their full name.
-STEP 2 — Ask for their date of birth to verify their identity.
-STEP 3 — Call find_patient with the name and date_of_birth you collected.
-  • If the patient is NOT found, apologise and ask them to call the clinic directly.
-  • If the patient IS found, confirm their name back and move to STEP 4.
+STEP 2 — Ask for their date of birth.
+  Example: "Could you tell me your date of birth?"
+- If the date is unclear, ask them to repeat it.
+- Always repeat the date back to confirm.
+  Example: "Just to confirm, your date of birth is March 15th, 1985 — is that right?"
+- Convert dates to YYYY-MM-DD format before calling functions.
+
+## PATIENT LOOKUP
+- Tell the caller to wait for profile lookup. Example: “Just a moment while I pull up your profile.”
+
+STEP 3 — Call `find_patient` with:
+  • name
+  • date_of_birth
+
+The function returns:
+  • success (boolean)
+  • patient (object or null)
+  • reason (string or null)
+
+Handle the result as follows:
+
+  IF success = true
+    → Confirm the match and proceed to scheduling.
+      Example: "Great, I found your profile. Let's get your appointment scheduled."
+
+  IF success = false
+    → Check the reason field:
+
+    reason = "no_results_for_name"
+      → Politely ask the caller to confirm or spell their name, then retry.
+
+    reason = "dob_mismatch"
+      → Explain that the name was found but the date of birth didn't match.
+      → Ask the caller to confirm their date of birth, then retry.
+
+    reason = "system_error"
+      → Apologize briefly and let them know you're trying again.
+      → Retry once. If it fails again, apologize and ask them to contact the clinic directly.
+
+  If the patient still cannot be found after retrying, say:
+  "I'm sorry, I wasn't able to locate your account. Please contact the clinic directly and they'll be happy to help."
+
+## APPOINTMENT SCHEDULING
+
 STEP 4 — Ask what date they would like their appointment.
-STEP 5 — Ask what time they would prefer.
-STEP 6 — Call create_appointment with the patient_id, date, and time.
-  • If booking succeeds, confirm the appointment details clearly and thank them.
-  • If booking fails, apologise and offer to try a different date or time.
+STEP 5 — Ask what time they prefer.
 
-Guidelines:
-- Be warm, concise and professional. This is a voice conversation so keep sentences short.
-- Always confirm back what you have heard before making a function call.
-- Format dates as YYYY-MM-DD and times as HH:MM (24-hour) before calling functions.
-  When the user says something like "March 15th" convert it to "2026-03-15".
-  When they say "2 PM" convert it to "14:00".
-- Never reveal internal patient IDs or raw API responses to the caller.
-- If at any point you are unsure, ask the caller to repeat themselves.
+Convert before calling functions:
+  • Dates  → YYYY-MM-DD      (e.g. "March 15th" → "2026-03-15")
+  • Times  → HH:MM 24-hour   (e.g. "2 PM" → "14:00")
+
+- Tell the caller to wait for appointment creation. Example: “Just a moment while I set up your appointment.”
+
+STEP 6 — Call `create_appointment` with:
+  • patient_id
+  • date
+  • time
+
+The function returns:
+  • success (boolean)
+  • appointment (object or null) — contains patient_id, date, and time if successful
+  • reason (string or null)
+
+Handle the result as follows:
+
+  IF success = true
+    → Confirm the appointment clearly using the details in the returned appointment object.
+      Example: "You're all set! Your appointment is confirmed for [date] at [time]."
+
+  IF success = false
+    → Check the reason field:
+
+    reason = "unavailable_time_slot"
+      → Let the caller know that time slot isn't available.
+      → Offer to try a different time or date.
+        Example: "It looks like that time slot isn't available. Would you like to try a different time or another day?"
+      → If prompted to try again, change the details as specified, and try again.
+
+    reason = "system_error"
+      → Apologize and let them know you're trying again.
+      → Retry once with the same details.
+      → If it fails again, apologize and ask them to contact the clinic directly.
+        Example: "I'm sorry, I'm having trouble completing the booking right now. Please contact the clinic directly and they'll get you scheduled."
+
+## CONVERSATION GUIDELINES
+
+- Keep sentences short and natural — this is a phone call.
+- Ask only one question at a time.
+- Always confirm key details (name, date of birth, appointment date and time) before calling functions.
+- Never mention internal system details, error codes, or technical reasons for failures.
+- Never reveal patient IDs or raw API responses.
+- If you didn't catch something, ask the caller to repeat it.
 """
 
 
@@ -240,14 +305,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     llm = OpenAILLMService(api_key=os.environ["OPENAI_API_KEY"])
 
     # Register function call handlers
-    llm.register_function("find_patient", handle_find_patient)
-    llm.register_function("create_appointment", handle_create_appointment)
+    llm.register_function("find_patient", handle_find_patient,cancel_on_interruption=False)
+    llm.register_function("create_appointment", handle_create_appointment,cancel_on_interruption=False)
 
     messages = [
         {"role":"system","content":SYSTEM_PROMPT}
     ]
 
-    context = LLMContext(messages, tools=TOOLS)
+    context = LLMContext(messages, tools=tools)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
@@ -305,7 +370,7 @@ async def bot(runner_args: RunnerArguments):
         "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.8)),
         ),
     }
 

@@ -172,6 +172,7 @@ async def find_patient(name: str, date_of_birth: str) -> dict:
 
         result_locator = page.locator('[data-testid="header-client-result"]')
 
+        # Check if name appears
         try:
             await result_locator.first.wait_for(state="visible", timeout=8000)
             logger.debug("[find_patient] Search results appeared")
@@ -195,11 +196,13 @@ async def find_patient(name: str, date_of_birth: str) -> dict:
             logger.warning(f"[find_patient] Could not parse date_of_birth={date_of_birth!r} as %Y-%m-%d, using as-is")
             dob_display = date_of_birth
 
+        # Results in search bars
         for i, result in enumerate(results):
             name_div = result.locator('[data-testid="header-client-result-name"]')
             raw_text = (await name_div.inner_text()).strip()
             logger.debug(f"[find_patient] Result[{i}] raw_text={raw_text!r}")
 
+            # Date next to the name in HTML
             if "(" in raw_text and ")" in raw_text:
                 display_name = raw_text[:raw_text.rfind("(")].strip()
                 display_dob = raw_text[raw_text.rfind("(") + 1: raw_text.rfind(")")].strip()
@@ -209,6 +212,7 @@ async def find_patient(name: str, date_of_birth: str) -> dict:
 
             logger.debug(f"[find_patient] Result[{i}] parsed name={display_name!r}, dob={display_dob!r}")
 
+            # Date matches
             if display_dob == dob_display:
                 logger.info(f"[find_patient] DOB match found for result[{i}]: name={display_name!r}")
                 view_profile_link = result.locator('[data-testid="view-profile"]')
@@ -217,7 +221,8 @@ async def find_patient(name: str, date_of_birth: str) -> dict:
                 logger.info(f"[find_patient] Resolved patient_id={patient_id!r} from href={href!r}")
 
                 await search_input.fill("")
-
+                
+                #Success
                 return {
                     "success": True,
                     "patient": {
@@ -239,7 +244,7 @@ async def find_patient(name: str, date_of_birth: str) -> dict:
             "patient": None,
             "reason": "dob_mismatch"
         }
-
+    # Unknown error
     except Exception as exc:
         logger.exception(f"[find_patient] Unexpected error for name={name!r}, dob={date_of_birth!r}: {exc}")
 
@@ -368,6 +373,7 @@ async def create_appointment(patient_id: str, date: str, time: str) -> dict | No
             f"[create_appointment] Successfully created appointment for patient_id={patient_id!r} "
             f"on {date!r} at {time_display!r}"
         )
+        # Success!
         return {
             "success": True,
             "appointment": {
@@ -377,7 +383,7 @@ async def create_appointment(patient_id: str, date: str, time: str) -> dict | No
             },
             "reason": None
         }
-
+    # Unknown error
     except Exception as exc:
         logger.exception(
             f"[create_appointment] Unexpected error for patient_id={patient_id!r}, "

@@ -23,6 +23,7 @@ import os
 from dotenv import load_dotenv
 import json
 from loguru import logger
+from datetime import datetime, timezone
 
 print("🚀 Starting Pipecat bot...")
 print("⏳ Loading models and imports (20 seconds, first run only)\n")
@@ -110,7 +111,16 @@ tools = ToolsSchema(standard_tools=[find_patient_function,create_appointment_fun
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """
+def _build_system_prompt() -> str:
+    now = datetime.now(timezone.utc)
+    today_str = now.strftime("%A, %B %-d, %Y")          
+    earliest_hour = (now.hour + 1) % 24                  
+    return f"""Today is {today_str} (UTC). The current time is {now.strftime("%H:%M")} UTC.
+
+""" + _SYSTEM_PROMPT_BODY
+
+
+_SYSTEM_PROMPT_BODY = """
 You are a friendly and professional appointment scheduling assistant at Prosper Health clinic.
 You are speaking with patients on a live phone call.
 Keep responses short, natural, and easy to understand.
@@ -123,17 +133,19 @@ STEP 1 — Ask for the caller's full name.
   Examples:
   - "Could you please repeat your name?"
   - "Could you spell your last name for me?"
-  Do not proceed until you are reasonably confident you heard the name correctly.
+- Do not proceed until you are confident you heard the name correctly.
 
 STEP 2 — Ask for their date of birth.
   Example: "Could you tell me your date of birth?"
 - If the date is unclear, ask them to repeat it.
-- Always repeat the date back to confirm.
+- Always repeat the date back to confirm before proceeding.
   Example: "Just to confirm, your date of birth is March 15th, 1985 — is that right?"
-- Convert dates to YYYY-MM-DD format before calling functions.
+- Convert the confirmed date to YYYY-MM-DD format before calling any function.
 
 ## PATIENT LOOKUP
-- Tell the caller to wait for profile lookup. Example: “Just a moment while I pull up your profile.”
+
+Tell the caller you're pulling up their profile before calling the function.
+  Example: "Just a moment while I pull up your profile."
 
 STEP 3 — Call `find_patient` with:
   • name
@@ -151,32 +163,43 @@ Handle the result as follows:
       Example: "Great, I found your profile. Let's get your appointment scheduled."
 
   IF success = false
-    → Check the reason field:
+    → Check the reason field and respond once, then retry:
 
     reason = "no_results_for_name"
-      → Politely ask the caller to confirm or spell their name, then retry.
+      → Ask the caller to confirm or spell their name.
 
     reason = "dob_mismatch"
-      → Explain that the name was found but the date of birth didn't match.
-      → Ask the caller to confirm their date of birth, then retry.
+      → Explain that the date of birth didn't match what's on file.
+      → Ask the caller to confirm their date of birth.
 
     reason = "system_error"
-      → Apologize briefly and let them know you're trying again.
-      → Retry once. If it fails again, apologize and ask them to contact the clinic directly.
+      → Apologize briefly.
+      → Retry immediately with the same details, without asking the caller anything.
 
-  If the patient still cannot be found after retrying, say:
-  "I'm sorry, I wasn't able to locate your account. Please contact the clinic directly and they'll be happy to help."
+## PATIENT LOOKUP RETRY LIMIT
+You may call `find_patient` at most 3 times total.
+Every call counts toward this limit, regardless of the failure reason.
+After 3 failed attempts, do not retry. Say:
+"I'm sorry, I wasn't able to locate your account. Please contact the clinic directly and they'll be happy to help."
+Then end the call politely.
 
 ## APPOINTMENT SCHEDULING
+
+When a caller gives a date without a year, assume the year is {now.year}.
 
 STEP 4 — Ask what date they would like their appointment.
 STEP 5 — Ask what time they prefer.
 
-Convert before calling functions:
-  • Dates  → YYYY-MM-DD      (e.g. "March 15th" → "2026-03-15")
-  • Times  → HH:MM 24-hour   (e.g. "2 PM" → "14:00")
+Appointments must be scheduled for today or a future date.
+If the requested date is today, the time must be {earliest_hour:02d}:00 or later (UTC).
+If either constraint is violated, politely tell the caller the requested date or time is in the past and ask them to choose another.
 
-- Tell the caller to wait for appointment creation. Example: “Just a moment while I set up your appointment.”
+Convert before calling functions:
+  • Dates → YYYY-MM-DD       (e.g. "March 15th" → "2026-03-15")
+  • Times → HH:MM 24-hour    (e.g. "2 PM" → "14:00")
+
+Tell the caller you're setting up their appointment before calling the function.
+  Example: "Just a moment while I set up your appointment."
 
 STEP 6 — Call `create_appointment` with:
   • patient_id
@@ -191,23 +214,32 @@ The function returns:
 Handle the result as follows:
 
   IF success = true
-    → Confirm the appointment clearly using the details in the returned appointment object.
+    → Confirm the appointment using the details in the returned appointment object.
       Example: "You're all set! Your appointment is confirmed for [date] at [time]."
 
   IF success = false
-    → Check the reason field:
+    → Check the reason field and respond once, then retry:
+
+    reason = "invalid_date"
+      → Tell the caller the requested date or time is in the past.
+      → Ask them to choose a future date or time.
+        Example: "That date and time have already passed. Could you give me a future date or time?"
 
     reason = "unavailable_time_slot"
-      → Let the caller know that time slot isn't available.
-      → Offer to try a different time or date.
+      → Let the caller know that slot isn't available.
+      → Ask if they'd like to try a different time or date.
         Example: "It looks like that time slot isn't available. Would you like to try a different time or another day?"
-      → If prompted to try again, change the details as specified, and try again.
 
     reason = "system_error"
-      → Apologize and let them know you're trying again.
-      → Retry once with the same details.
-      → If it fails again, apologize and ask them to contact the clinic directly.
-        Example: "I'm sorry, I'm having trouble completing the booking right now. Please contact the clinic directly and they'll get you scheduled."
+      → Apologize briefly.
+      → Retry immediately with the same details, without asking the caller anything.
+
+## APPOINTMENT SCHEDULING RETRY LIMIT
+You may call `create_appointment` at most 3 times total.
+Every call counts toward this limit, regardless of the failure reason.
+After 3 failed attempts, do not retry. Say:
+"I'm sorry, I'm having trouble completing the booking right now. Please contact the clinic directly and they'll get you scheduled."
+Then end the call politely.
 
 ## CONVERSATION GUIDELINES
 
@@ -233,28 +265,18 @@ async def handle_find_patient(
     result_callback,
 ):
     """Bridge between the LLM function call and healthie.find_patient."""
-    from healthie import find_patient  # local import avoids circular deps
-
+    from healthie import find_patient 
     name = args.get("name", "")
     dob = args.get("date_of_birth", "")
     logger.info(f"[tool] find_patient name={name!r} dob={dob!r}")
 
     try:
-        patient = await find_patient(name=name, date_of_birth=dob)
-        if patient:
-            logger.info(f"[tool] Patient found: {patient}")
-            await result_callback(json.dumps({"status": "found", "patient": patient}))
-        else:
-            logger.warning(f"[tool] Patient not found")
-            await result_callback(
-                json.dumps({"status": "not_found", "message": "No patient matching that name and date of birth was found in the system."})
-            )
+        result = await find_patient(name=name, date_of_birth=dob)
+        logger.info(f"[tool] find_patient result: {result}")
+        await result_callback(json.dumps(result))  # always call
     except Exception as exc:
         logger.exception(f"[tool] find_patient error: {exc}")
-        await result_callback(
-            json.dumps({"status": "error", "message": f"There was a problem searching for the patient: {exc}"})
-        )
-
+        await result_callback(json.dumps({"success": False, "reason": "system_error"}))
 
 async def handle_create_appointment(
     function_name: str,
@@ -265,7 +287,7 @@ async def handle_create_appointment(
     result_callback,
 ):
     """Bridge between the LLM function call and healthie.create_appointment."""
-    from healthie import create_appointment  # local import avoids circular deps
+    from healthie import create_appointment  
 
     patient_id = args.get("patient_id", "")
     date = args.get("date", "")
@@ -273,20 +295,23 @@ async def handle_create_appointment(
     logger.info(f"[tool] create_appointment patient_id={patient_id!r} date={date!r} time={time!r}")
 
     try:
-        appointment = await create_appointment(patient_id=patient_id, date=date, time=time)
-        if appointment:
-            logger.info(f"[tool] Appointment created: {appointment}")
-            await result_callback(json.dumps({"status": "created", "appointment": appointment}))
-        else:
-            logger.warning(f"[tool] Appointment creation returned None")
-            await result_callback(
-                json.dumps({"status": "failed", "message": "The appointment could not be created. The time slot may be unavailable."})
-            )
+        appt_dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        now_floored = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        if appt_dt < now_floored:
+            logger.warning(f"[tool] create_appointment rejected: {appt_dt} is in the past")
+            await result_callback(json.dumps({"success": False, "appointment": None, "reason": "invalid_date"}))
+            return
+    except ValueError:
+        pass  # malformed input - system_error later
+
+
+    try:
+        result = await create_appointment(patient_id=patient_id, date=date, time=time)
+        logger.info(f"[tool] create_appointment result: {result}")
+        await result_callback(json.dumps(result))  
     except Exception as exc:
         logger.exception(f"[tool] create_appointment error: {exc}")
-        await result_callback(
-            json.dumps({"status": "error", "message": f"There was a problem creating the appointment: {exc}"})
-        )
+        await result_callback(json.dumps({"success": False, "reason": "system_error"}))
 
 # ---------------------------------------------------------------------------
 # Main bot entrypoint
@@ -309,7 +334,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     llm.register_function("create_appointment", handle_create_appointment,cancel_on_interruption=False)
 
     messages = [
-        {"role":"system","content":SYSTEM_PROMPT}
+        {"role":"system","content":_build_system_prompt()}
     ]
 
     context = LLMContext(messages, tools=tools)
